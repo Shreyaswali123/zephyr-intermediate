@@ -1,108 +1,167 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/zbus/zbus.h>
 
-LOG_MODULE_REGISTER(homework, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(homework, LOG_LEVEL_INF);
 
-#define STACK_SIZE        1024
-#define BURST_EVENTS      5
-#define BURST_INTERVAL_MS 5
-#define DEBOUNCE_MS       30
-#define BURST_COUNT       3
-
-static int total_events;
-static int total_processed;
+#define STACK_SIZE       1024
+#define SENSOR_INTERVAL  100
+#define SAMPLE_COUNT     10
 
 /* ---------------------------------------------------------------
- * Debounce work handler
+ * Sensor data message
  * --------------------------------------------------------------- */
 
-static void sensor_handler(struct k_work *work)
+struct sensor_data {
+    int sample;
+    int temperature;
+    int pressure;
+};
+
+/* ---------------------------------------------------------------
+ * zbus channel
+ * --------------------------------------------------------------- */
+
+ZBUS_CHAN_DEFINE(sensor_chan,
+                 struct sensor_data,
+                 NULL,
+                 NULL,
+                 ZBUS_OBSERVERS(sensor_listener, sensor_subscriber),
+                 ZBUS_MSG_INIT(0));
+
+/* ---------------------------------------------------------------
+ * Fast listener
+ * --------------------------------------------------------------- */
+
+static void sensor_listener_cb(const struct zbus_channel *chan)
 {
-    ARG_UNUSED(work);
+    const struct sensor_data *data;
 
-    total_processed++;
+    data = zbus_chan_const_msg(chan);
 
-    LOG_INF("[HANDLER] processed burst %d  tick=%u",
-            total_processed,
+    LOG_INF("[LISTENER] sample=%d temp=%d pressure=%d tick=%u",
+            data->sample,
+            data->temperature,
+            data->pressure,
             k_uptime_get_32());
 }
 
-/*
- * Delayable work allows us to postpone execution.
- *
- * Every new sensor event reschedules the handler 30 ms into
- * the future. Therefore, a burst of events collapses into one
- * handler execution.
- */
-K_WORK_DELAYABLE_DEFINE(debounce_work, sensor_handler);
+ZBUS_LISTENER_DEFINE(sensor_listener, sensor_listener_cb);
 
 /* ---------------------------------------------------------------
- * Sensor simulator
+ * Slower subscriber
  * --------------------------------------------------------------- */
 
-static void sensor_sim_fn(void *p1, void *p2, void *p3)
+ZBUS_SUBSCRIBER_DEFINE(sensor_subscriber, 8);
+
+/* ---------------------------------------------------------------
+ * Sensor publisher
+ * --------------------------------------------------------------- */
+
+static void sensor_thread_fn(void *p1, void *p2, void *p3)
 {
     ARG_UNUSED(p1);
     ARG_UNUSED(p2);
     ARG_UNUSED(p3);
 
-    for (int burst = 0; burst < BURST_COUNT; burst++) {
+    for (int i = 1; i <= SAMPLE_COUNT; i++) {
 
-        LOG_INF("[BURST] starting burst %d  tick=%u",
-                burst + 1,
+        struct sensor_data data = {
+            .sample = i,
+            .temperature = 20 + i,
+            .pressure = 1000 + (i * 2),
+        };
+
+        LOG_INF("[SENSOR] publishing sample=%d tick=%u",
+                data.sample,
                 k_uptime_get_32());
 
-        for (int i = 0; i < BURST_EVENTS; i++) {
+        int ret = zbus_chan_pub(&sensor_chan,
+                                &data,
+                                K_FOREVER);
 
-            total_events++;
-
-            LOG_INF("[SENSOR] event %d.%d  tick=%u",
-                    burst + 1,
-                    i + 1,
-                    k_uptime_get_32());
-
-            int ret = k_work_reschedule(
-                &debounce_work,
-                K_MSEC(DEBOUNCE_MS));
-
-            if (ret < 0) {
-                LOG_ERR("[SENSOR] reschedule failed: %d", ret);
-            }
-
-            /*
-             * Rapid events within the debounce window.
-             */
-            k_msleep(BURST_INTERVAL_MS);
+        if (ret != 0) {
+            LOG_ERR("[SENSOR] publish failed: %d", ret);
         }
 
-        LOG_INF("[BURST] finished burst %d  tick=%u",
-                burst + 1,
-                k_uptime_get_32());
-
-        /*
-         * Wait long enough for the debounced handler to execute
-         * before starting the next burst.
-         */
-        k_msleep(100);
+        k_msleep(SENSOR_INTERVAL);
     }
 
-    LOG_INF("[SENSOR] all bursts produced");
-    LOG_INF("[SUMMARY] sensor_events=%d  handler_runs=%d",
-            total_events,
-            total_processed);
+    LOG_INF("[SENSOR] all samples published");
 }
 
 /* ---------------------------------------------------------------
- * Sensor thread
+ * Subscriber thread
+ * --------------------------------------------------------------- */
+
+static void subscriber_thread_fn(void *p1, void *p2, void *p3)
+{
+    ARG_UNUSED(p1);
+    ARG_UNUSED(p2);
+    ARG_UNUSED(p3);
+
+    const struct zbus_channel *chan;
+
+    while (1) {
+
+        int ret = zbus_sub_wait(&sensor_subscriber,
+                                &chan,
+                                K_FOREVER);
+
+        if (ret != 0) {
+            LOG_ERR("[SUBSCRIBER] wait failed: %d", ret);
+            continue;
+        }
+
+        struct sensor_data data;
+
+        ret = zbus_chan_read(chan,
+                             &data,
+                             K_NO_WAIT);
+
+        if (ret != 0) {
+            LOG_ERR("[SUBSCRIBER] read failed: %d", ret);
+            continue;
+        }
+
+        LOG_INF("[SUBSCRIBER] sample=%d temp=%d pressure=%d tick=%u",
+                data.sample,
+                data.temperature,
+                data.pressure,
+                k_uptime_get_32());
+
+        if (data.sample >= SAMPLE_COUNT) {
+            break;
+        }
+        /*
+         * Simulate slower logging.
+         */
+        k_msleep(150);
+    }
+    LOG_INF("[SUBSCRIBER] all samples processed");
+}
+
+/* ---------------------------------------------------------------
+ * Threads
  * --------------------------------------------------------------- */
 
 K_THREAD_DEFINE(sensor_thread,
                 STACK_SIZE,
-                sensor_sim_fn,
+                sensor_thread_fn,
                 NULL,
                 NULL,
                 NULL,
                 5,
+                0,
+                0);
+
+K_THREAD_DEFINE(subscriber_thread,
+                STACK_SIZE,
+                subscriber_thread_fn,
+                NULL,
+                NULL,
+                NULL,
+                6,
                 0,
                 0);
 
@@ -112,16 +171,14 @@ K_THREAD_DEFINE(sensor_thread,
 
 int main(void)
 {
-    LOG_INF("=== L3 Homework: Workqueue Debounce ===");
-    LOG_INF("Burst: %d events, %dms apart",
-            BURST_EVENTS,
-            BURST_INTERVAL_MS);
-    LOG_INF("Debounce delay: %dms", DEBOUNCE_MS);
+    LOG_INF("=== L4 Homework: zbus ===");
+    LOG_INF("Sensor publishes every %dms", SENSOR_INTERVAL);
+    LOG_INF("Listener: fast display updates");
+    LOG_INF("Subscriber: slower logging");
 
-    /*
-     * 3 bursts × roughly 125 ms + startup margin.
-     */
-    k_msleep(1000);
+    k_msleep((SAMPLE_COUNT + 3) * SENSOR_INTERVAL);
+
+    LOG_INF("=== L4 complete ===");
 
     return 0;
 }
