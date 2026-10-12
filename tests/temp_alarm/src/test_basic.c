@@ -71,27 +71,58 @@ ZTEST_SUITE(temp_alarm_check, NULL, NULL, before, NULL, NULL);
 
 ZTEST(temp_alarm_check, test_below_threshold)
 {
-	/* TODO(l8-task1): a reading of 20 C is below the threshold.
-	 * Check the status, and how the module talked to the sensor.
-	 * See TEST_SPEC.md "Suite temp_alarm_check" #1.
-	 */
-	ztest_test_skip();
+	struct temp_alarm_status status;
+
+	sensor_fake_set_temperature(20);
+
+	zassert_ok(temp_alarm_check(), "check should succeed");
+	zassert_ok(temp_alarm_get_status(&status), "get_status should succeed");
+
+	zassert_equal(status.last_temp, 20, "last_temp should be 20");
+	zassert_false(status.is_alarming, "20 C must not raise the alarm");
+
+	zassert_equal(fake_sensor_sample_fetch_fake.call_count, 1,
+		      "sample_fetch should be called exactly once");
+	zassert_equal(fake_sensor_sample_fetch_fake.arg1_val,
+		      SENSOR_CHAN_AMBIENT_TEMP,
+		      "sample_fetch should request ambient temperature");
+
+	zassert_equal(fake_sensor_channel_get_fake.call_count, 1,
+		      "channel_get should be called exactly once");
+	zassert_equal(fake_sensor_channel_get_fake.arg1_val,
+		      SENSOR_CHAN_AMBIENT_TEMP,
+		      "channel_get should request ambient temperature");
 }
 
 ZTEST(temp_alarm_check, test_at_threshold)
 {
-	/* TODO(l8-task1): a reading equal to the threshold (30 C) is not an alarm.
-	 * See TEST_SPEC.md "Suite temp_alarm_check" #2.
-	 */
-	ztest_test_skip();
+	struct temp_alarm_status status;
+
+	sensor_fake_set_temperature(30);
+
+	zassert_ok(temp_alarm_check(), "check should succeed");
+	zassert_ok(temp_alarm_get_status(&status), "get_status should succeed");
+
+	zassert_equal(status.last_temp, 30, "last_temp should be 30");
+	zassert_false(status.is_alarming,
+		      "A reading equal to the threshold must not alarm");
+	zassert_equal(status.alarm_count, 0U,
+		      "Alarm count should remain zero at the threshold");
 }
 
 ZTEST(temp_alarm_check, test_above_threshold)
 {
-	/* TODO(l8-task1): a reading of 40 C raises the alarm and counts it.
-	 * See TEST_SPEC.md "Suite temp_alarm_check" #3.
-	 */
-	ztest_test_skip();
+	struct temp_alarm_status status;
+
+	sensor_fake_set_temperature(40);
+
+	zassert_ok(temp_alarm_check(), "check should succeed");
+	zassert_ok(temp_alarm_get_status(&status), "get_status should succeed");
+
+	zassert_equal(status.last_temp, 40, "last_temp should be 40");
+	zassert_true(status.is_alarming, "40 C should raise the alarm");
+	zassert_equal(status.alarm_count, 1U,
+		      "Alarm count should increase to one");
 }
 
 /*
@@ -105,11 +136,29 @@ ZTEST_SUITE(temp_alarm_threshold, NULL, NULL, before, NULL, NULL);
 
 ZTEST(temp_alarm_threshold, test_new_threshold_clears_alarm)
 {
-	/* TODO(l8-task1): raise the alarm, then move the threshold
-	 * above the reading. The alarm must clear and stay cleared.
-	 * See TEST_SPEC.md "Suite temp_alarm_threshold" #1.
-	 */
-	ztest_test_skip();
+	struct temp_alarm_status status;
+
+	sensor_fake_set_temperature(40);
+
+	zassert_ok(temp_alarm_check(), "Initial check should succeed");
+	zassert_ok(temp_alarm_get_status(&status), "get_status should succeed");
+	zassert_true(status.is_alarming, "40 C should initially raise the alarm");
+	zassert_equal(status.alarm_count, 1U, "Alarm count should be one");
+
+	zassert_ok(temp_alarm_set_threshold(50),
+		   "Changing threshold to 50 should succeed");
+
+	zassert_ok(temp_alarm_get_status(&status), "get_status should succeed");
+	zassert_false(status.is_alarming,
+		      "Changing the threshold should clear the alarm");
+
+	zassert_ok(temp_alarm_check(), "Second check should succeed");
+	zassert_ok(temp_alarm_get_status(&status), "get_status should succeed");
+
+	zassert_equal(status.last_temp, 40, "last_temp should remain 40");
+	zassert_false(status.is_alarming, "40 C is below the new threshold");
+	zassert_equal(status.alarm_count, 1U,
+		      "Alarm count should remain one");
 }
 
 /*
@@ -123,9 +172,25 @@ ZTEST_SUITE(temp_alarm_reset, NULL, NULL, before, NULL, NULL);
 
 ZTEST(temp_alarm_reset, test_reset_clears_state)
 {
-	/* TODO(l8-task1): raise the alarm three times, then reset.
-	 * The alarm state must clear, but the last reading must stay.
-	 * See TEST_SPEC.md "Suite temp_alarm_reset" #1.
-	 */
-	ztest_test_skip();
+	struct temp_alarm_status status;
+
+	sensor_fake_set_temperature(40);
+
+	for (int i = 0; i < 3; i++) {
+		zassert_ok(temp_alarm_check(), "Check should succeed");
+	}
+
+	zassert_ok(temp_alarm_get_status(&status), "get_status should succeed");
+	zassert_equal(status.alarm_count, 3U,
+		      "Three alarming checks should produce count three");
+	zassert_true(status.is_alarming, "Alarm should be active before reset");
+
+	temp_alarm_reset();
+
+	zassert_ok(temp_alarm_get_status(&status), "get_status should succeed");
+	zassert_false(status.is_alarming, "Reset should clear alarm state");
+	zassert_equal(status.alarm_count, 0U, "Reset should clear alarm count");
+	zassert_equal(status.last_error, 0, "Reset should clear last error");
+	zassert_equal(status.last_temp, 40,
+		      "Reset should preserve the last temperature");
 }
